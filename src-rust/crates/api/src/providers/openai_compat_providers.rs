@@ -70,6 +70,10 @@ pub fn ollama() -> OpenAiCompatProvider {
             "exceeded.*context length".to_string(),
         ],
         no_api_key_required: true,
+        // Ollama's OpenAI-compat endpoint only emits a final usage chunk when
+        // stream_options.include_usage is requested; without it the context
+        // meter's "used" count never advances.
+        include_usage_in_stream: true,
         ollama_native_host: Some(host),
         ..Default::default()
     })
@@ -332,6 +336,12 @@ pub fn nvidia() -> OpenAiCompatProvider {
         "https://integrate.api.nvidia.com/v1",
     )
     .with_api_key(key)
+    // NIM honors stream_options.include_usage; request it so the context
+    // meter's "used" count advances during streaming.
+    .with_quirks(ProviderQuirks {
+        include_usage_in_stream: true,
+        ..Default::default()
+    })
 }
 
 /// SiliconFlow — DeepSeek / Qwen hosting.  Reads `SILICONFLOW_API_KEY`.
