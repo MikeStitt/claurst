@@ -5978,11 +5978,16 @@ impl App {
                 self.is_streaming = false;
                 self.spinner_verb = None;
 
-                // Update context window usage from the usage info.
+                // Update context window usage from the usage info. The prompt
+                // (input_tokens + cached) already covers the entire conversation
+                // so far, so the latest turn's prompt + its output *is* the
+                // current context occupancy — set it, don't accumulate across
+                // turns (that would sum the growing history every turn).
                 if let Some(ref u) = usage {
-                    let turn_tokens = u.input_tokens + u.output_tokens
-                        + u.cache_creation_input_tokens + u.cache_read_input_tokens;
-                    self.context_used_tokens = self.context_used_tokens.saturating_add(turn_tokens);
+                    self.context_used_tokens = u.input_tokens
+                        + u.cache_creation_input_tokens
+                        + u.cache_read_input_tokens
+                        + u.output_tokens;
                 }
                 // Record elapsed time and pick a completion verb
                 let seed = self.frame_count as usize ^ (self.messages.len() * 7);
