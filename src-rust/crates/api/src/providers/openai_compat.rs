@@ -520,6 +520,13 @@ impl OpenAiCompatProvider {
         }
         merge_openai_compatible_options(&mut body, &request.provider_options);
 
+        // Diagnostic: dump the exact outgoing request body when CLAURST_DUMP_REQUEST
+        // names a writable path (off unless set). Used to compare claurst's wire
+        // request against a known-good probe.
+        if let Ok(dump_path) = std::env::var("CLAURST_DUMP_REQUEST") {
+            let _ = std::fs::write(&dump_path, serde_json::to_vec_pretty(&body).unwrap_or_default());
+        }
+
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let builder = self
             .http_client

@@ -723,6 +723,23 @@ const MAX_TOKENS_RECOVERY_MSG: &str =
 /// during tool execution (e.g. by the UI or a command queue).  Each string is
 /// appended as a plain user message between turns.  Callers that do not need
 /// command queuing may pass `None` or an empty `Vec`.
+/// danno instrumentation: flushed, timestamped trace of the agent loop, gated on the
+/// CLAURST_LOOP_LOG env var (a writable file path). Off by default. Added to diagnose the
+/// post-tool-execution stall (45s provider_stall_timeout vs slow local-model prefill).
+fn loop_log(msg: &str) {
+    use std::io::Write;
+    if let Ok(path) = std::env::var("CLAURST_LOOP_LOG") {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs_f64())
+                .unwrap_or(0.0);
+            let _ = writeln!(f, "{:.3} {}", ts, msg);
+            let _ = f.flush();
+        }
+    }
+}
+
 pub async fn run_query_loop(
     client: &claurst_api::AnthropicClient,
     messages: &mut Vec<Message>,
@@ -784,6 +801,7 @@ pub async fn run_query_loop(
         tool_ctx
             .current_turn
             .store(turn as usize, std::sync::atomic::Ordering::Relaxed);
+        loop_log(&format!("TURN {} start: {} messages", turn, messages.len()));
         if turn > effective_max_turns {
             info!(turns = turn, "Max turns reached");
             if let Some(ref tx) = event_tx {
@@ -906,6 +924,7 @@ pub async fn run_query_loop(
 
             build_system_prompt(&patched)
         };
+        loop_log(&format!("BUILD turn={}: system prompt assembled, building request", turn));
 
         let system_for_provider = system.clone(); // used by non-Anthropic dispatch below
         let mut req_builder = CreateMessageRequest::builder(&effective_model, config.max_tokens)
@@ -1178,15 +1197,22 @@ pub async fn run_query_loop(
 
                     // Use create_message_stream so the TUI receives real-time
                     // text deltas instead of waiting for the full response.
+                    loop_log(&format!(
+                        "DISPATCH turn={}: calling create_message_stream ({} messages)",
+                        turn,
+                        messages.len()
+                    ));
                     let mut stream = match provider.create_message_stream(provider_request).await {
                         Ok(s) => s,
                         Err(e) => {
+                            loop_log(&format!("DISPATCH turn={}: ERROR {}", turn, e));
                             error!(provider = %provider_id_str, error = %e, "Provider stream failed");
                             return QueryOutcome::Error(
                                 claurst_core::error::ClaudeError::Api(e.to_string())
                             );
                         }
                     };
+                    loop_log(&format!("DISPATCH turn={}: stream opened", turn));
 
                     // Accumulators for building the final assistant message.
                     let mut text_chunks: Vec<String> = Vec::new();
@@ -1221,6 +1247,7 @@ pub async fn run_query_loop(
                                 return QueryOutcome::Cancelled;
                             }
                             _ = &mut provider_stall => {
+                                loop_log(&format!("STALL FIRED turn={}: no stream data within provider_stall_timeout", turn));
                                 provider_stream_stalled = true;
                                 break;
                             }
@@ -1332,6 +1359,14 @@ pub async fn run_query_loop(
                             content_blocks.push(ContentBlock::ToolUse { id, name, input });
                         }
                     }
+                    let n_tool_use = content_blocks
+                        .iter()
+                        .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                        .count();
+                    loop_log(&format!(
+                        "PARSE turn={} stop={} tool_use_blocks={} text_len={} stalled={}",
+                        turn, stop_str, n_tool_use, combined_text.len(), provider_stream_stalled
+                    ));
 
                     let mut assistant_msg = Message {
                         role: claurst_core::types::Role::Assistant,
@@ -1397,6 +1432,7 @@ pub async fn run_query_loop(
                             cost: None,
                             snapshot_patch: None,
                         });
+                        loop_log(&format!("CONTINUE turn={}: executed tools, looping for next request", turn));
                         continue; // loop for next turn
                     }
 
@@ -1446,6 +1482,10 @@ pub async fn run_query_loop(
                         }
                     }
 
+                    loop_log(&format!(
+                        "ENDTURN turn={}: no tool_use blocks -> returning to caller (stop={})",
+                        turn, stop_str
+                    ));
                     return QueryOutcome::EndTurn {
                         message: assistant_msg,
                         usage,
