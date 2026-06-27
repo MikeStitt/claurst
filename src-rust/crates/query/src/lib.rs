@@ -1108,6 +1108,25 @@ pub async fn run_query_loop(
                     } else {
                         Vec::new()
                     };
+                    // Fail loud: when a model's registry capability reports tool_calling=false
+                    // (e.g. a models catalog/overlay entry that omits the `tool_call` field, which
+                    // then defaults to false), the agent silently ships ZERO tools. The model then
+                    // narrates tool calls as plain text and the loop ends after one turn — a
+                    // confusing, hard-to-diagnose failure. Surface it instead of hiding it.
+                    if provider_tools.is_empty() && !tools.is_empty() {
+                        // eprintln! (not tracing::warn!) so this is visible in headless `-p` runs,
+                        // where no tracing subscriber prints WARN-level events — otherwise the
+                        // failure stays silent, which is the whole problem we're surfacing.
+                        eprintln!(
+                            "[claurst] tools disabled for {}/{}: its model-registry capability \
+                             reports tool_calling=false, so 0 of {} available tools were sent. The \
+                             model will narrate tool calls as text and the run will stop after one \
+                             turn. If it can tool-call, set tool_call=true in its model-registry entry.",
+                            provider_id_str,
+                            model_id_str,
+                            tools.len()
+                        );
+                    }
                     let provider_messages: Vec<claurst_core::types::Message> = messages
                         .iter()
                         .map(|msg| {
@@ -1182,7 +1201,16 @@ pub async fn run_query_loop(
                     let mut msg_id = uuid::Uuid::new_v4().to_string();
 
                     use futures::StreamExt as ProviderStreamExt;
-                    let provider_stall_timeout = std::time::Duration::from_secs(45);
+                    // Configurable via CLAURST_PROVIDER_STALL_TIMEOUT_SECS (default 600).
+                    // The old hard-coded 45s aborted slow local prefills (98-157s measured on
+                    // large-context Ollama models), exhausting retries and building the turn from
+                    // incomplete stream data -> dropped tool-call blocks -> premature end-of-turn.
+                    let provider_stall_timeout = std::time::Duration::from_secs(
+                        std::env::var("CLAURST_PROVIDER_STALL_TIMEOUT_SECS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(600),
+                    );
                     let provider_stall = tokio::time::sleep(provider_stall_timeout);
                     tokio::pin!(provider_stall);
                     let mut provider_stream_stalled = false;

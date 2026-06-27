@@ -1875,11 +1875,17 @@ impl App {
         if let Some(entry) = self.model_registry.get(provider, model_id) {
             self.context_window_size = entry.info.context_window as u64;
         } else {
-            // Fallback: common defaults
+            // Fallback: common defaults. For local servers (ollama/lmstudio/llamacpp) the
+            // real window is whatever the model was loaded with (its `num_ctx`), which is
+            // NOT in the models.dev catalog and is often far smaller than a cloud default —
+            // assuming 128 K badly under-reports the meter. Use a conservative local default
+            // and prefer an explicit registry entry (the authoritative source; danno supplies
+            // one via CLAURST_MODELS_PATH). TODO: read `/api/show` parameters.num_ctx for ollama.
             self.context_window_size = match provider {
                 "anthropic" => 200_000,
                 "openai" => 128_000,
                 "google" => 1_048_576,
+                "ollama" | "lmstudio" | "lm-studio" | "llamacpp" | "llama-cpp" => 8_192,
                 _ => 128_000,
             };
         }
@@ -5978,11 +5984,16 @@ impl App {
                 self.is_streaming = false;
                 self.spinner_verb = None;
 
-                // Update context window usage from the usage info.
+                // Update context window usage from the usage info. The prompt
+                // (input_tokens + cached) already covers the entire conversation
+                // so far, so the latest turn's prompt + its output *is* the
+                // current context occupancy — set it, don't accumulate across
+                // turns (that would sum the growing history every turn).
                 if let Some(ref u) = usage {
-                    let turn_tokens = u.input_tokens + u.output_tokens
-                        + u.cache_creation_input_tokens + u.cache_read_input_tokens;
-                    self.context_used_tokens = self.context_used_tokens.saturating_add(turn_tokens);
+                    self.context_used_tokens = u.input_tokens
+                        + u.cache_creation_input_tokens
+                        + u.cache_read_input_tokens
+                        + u.output_tokens;
                 }
                 // Record elapsed time and pick a completion verb
                 let seed = self.frame_count as usize ^ (self.messages.len() * 7);
