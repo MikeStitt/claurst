@@ -1114,13 +1114,17 @@ pub async fn run_query_loop(
                     // narrates tool calls as plain text and the loop ends after one turn — a
                     // confusing, hard-to-diagnose failure. Surface it instead of hiding it.
                     if provider_tools.is_empty() && !tools.is_empty() {
-                        tracing::warn!(
-                            provider = %provider_id_str,
-                            model = %model_id_str,
-                            available_tools = tools.len(),
-                            "tool_calling is disabled for this model (registry capability = false); \
-                             sending 0 tools. If the model can tool-call, set tool_call=true in its \
-                             model-registry entry."
+                        // eprintln! (not tracing::warn!) so this is visible in headless `-p` runs,
+                        // where no tracing subscriber prints WARN-level events — otherwise the
+                        // failure stays silent, which is the whole problem we're surfacing.
+                        eprintln!(
+                            "[claurst] tools disabled for {}/{}: its model-registry capability \
+                             reports tool_calling=false, so 0 of {} available tools were sent. The \
+                             model will narrate tool calls as text and the run will stop after one \
+                             turn. If it can tool-call, set tool_call=true in its model-registry entry.",
+                            provider_id_str,
+                            model_id_str,
+                            tools.len()
                         );
                     }
                     let provider_messages: Vec<claurst_core::types::Message> = messages
