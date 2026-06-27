@@ -1182,7 +1182,16 @@ pub async fn run_query_loop(
                     let mut msg_id = uuid::Uuid::new_v4().to_string();
 
                     use futures::StreamExt as ProviderStreamExt;
-                    let provider_stall_timeout = std::time::Duration::from_secs(45);
+                    // Configurable via CLAURST_PROVIDER_STALL_TIMEOUT_SECS (default 600).
+                    // The old hard-coded 45s aborted slow local prefills (98-157s measured on
+                    // large-context Ollama models), exhausting retries and building the turn from
+                    // incomplete stream data -> dropped tool-call blocks -> premature end-of-turn.
+                    let provider_stall_timeout = std::time::Duration::from_secs(
+                        std::env::var("CLAURST_PROVIDER_STALL_TIMEOUT_SECS")
+                            .ok()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(600),
+                    );
                     let provider_stall = tokio::time::sleep(provider_stall_timeout);
                     tokio::pin!(provider_stall);
                     let mut provider_stream_stalled = false;
