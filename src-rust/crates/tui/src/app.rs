@@ -1875,11 +1875,17 @@ impl App {
         if let Some(entry) = self.model_registry.get(provider, model_id) {
             self.context_window_size = entry.info.context_window as u64;
         } else {
-            // Fallback: common defaults
+            // Fallback: common defaults. For local servers (ollama/lmstudio/llamacpp) the
+            // real window is whatever the model was loaded with (its `num_ctx`), which is
+            // NOT in the models.dev catalog and is often far smaller than a cloud default —
+            // assuming 128 K badly under-reports the meter. Use a conservative local default
+            // and prefer an explicit registry entry (the authoritative source; danno supplies
+            // one via CLAURST_MODELS_PATH). TODO: read `/api/show` parameters.num_ctx for ollama.
             self.context_window_size = match provider {
                 "anthropic" => 200_000,
                 "openai" => 128_000,
                 "google" => 1_048_576,
+                "ollama" | "lmstudio" | "lm-studio" | "llamacpp" | "llama-cpp" => 8_192,
                 _ => 128_000,
             };
         }
