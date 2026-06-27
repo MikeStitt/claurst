@@ -1108,6 +1108,21 @@ pub async fn run_query_loop(
                     } else {
                         Vec::new()
                     };
+                    // Fail loud: when a model's registry capability reports tool_calling=false
+                    // (e.g. a models catalog/overlay entry that omits the `tool_call` field, which
+                    // then defaults to false), the agent silently ships ZERO tools. The model then
+                    // narrates tool calls as plain text and the loop ends after one turn — a
+                    // confusing, hard-to-diagnose failure. Surface it instead of hiding it.
+                    if provider_tools.is_empty() && !tools.is_empty() {
+                        tracing::warn!(
+                            provider = %provider_id_str,
+                            model = %model_id_str,
+                            available_tools = tools.len(),
+                            "tool_calling is disabled for this model (registry capability = false); \
+                             sending 0 tools. If the model can tool-call, set tool_call=true in its \
+                             model-registry entry."
+                        );
+                    }
                     let provider_messages: Vec<claurst_core::types::Message> = messages
                         .iter()
                         .map(|msg| {
