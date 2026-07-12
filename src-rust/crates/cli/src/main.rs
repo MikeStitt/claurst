@@ -2994,7 +2994,18 @@ async fn run_interactive(
 
         // Auto-compact: when context usage hits 99% and no query is running,
         // automatically submit a compact request.
+        //
+        // Two safety gates prevent the auto-compact livelock:
+        //   * `!context_window_is_estimate` — never dispatch an unprompted turn
+        //     based on a guessed context window; the denominator must be
+        //     registry-backed.
+        //   * `!auto_compact_latched` — once a compact turn has run without
+        //     reducing usage, don't keep re-dispatching a turn that can't help
+        //     (it re-arms only when usage drops back below the threshold or the
+        //     context is reset).
         if app.context_window_size > 0
+            && !app.context_window_is_estimate
+            && !app.auto_compact_latched
             && !app.is_streaming
             && current_query.is_none()
             && !app.auto_compact_running
@@ -3619,9 +3630,27 @@ async fn run_interactive(
                 }
                 if app.auto_compact_running {
                     app.auto_compact_running = false;
-                    // After auto-compact the context was summarised — reset usage.
-                    app.context_used_tokens = 0;
-                    app.status_message = Some("Auto-compact complete.".to_string());
+                    // The compact turn only *appends* a summary; it does not yet
+                    // prune history (see Bug 10). Judge honestly whether usage
+                    // actually fell instead of faking a zero reset — if it did
+                    // not, latch so we never re-dispatch a compact that cannot
+                    // help. Don't hide the livelock behind a cosmetic reset.
+                    let used_pct = if app.context_window_size > 0 {
+                        (app.context_used_tokens as f64
+                            / app.context_window_size as f64 * 100.0) as u64
+                    } else {
+                        0
+                    };
+                    if used_pct >= 95 {
+                        app.auto_compact_latched = true;
+                        app.status_message = Some(format!(
+                            "Auto-compact did not reduce context ({}% used); \
+                             auto-compaction paused. Use /compact or /clear.",
+                            used_pct
+                        ));
+                    } else {
+                        app.status_message = Some("Auto-compact complete.".to_string());
+                    }
                 }
 
                 // Save session to JSONL (primary storage)

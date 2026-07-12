@@ -969,6 +969,11 @@ pub struct App {
     pub auto_compact_threshold: u8,
     /// Guard to prevent re-triggering auto-compact while one is in flight.
     pub auto_compact_running: bool,
+    /// Latched true after an auto-compact turn that failed to reduce context
+    /// usage, to stop re-dispatching a compact that cannot help (livelock
+    /// guard). Cleared when usage falls back below the re-arm threshold or the
+    /// context is reset.
+    pub auto_compact_latched: bool,
 
     // ---- Voice hold-to-talk ------------------------------------------------
 
@@ -998,6 +1003,9 @@ pub struct App {
 
     /// Total context window size for the current model (tokens).
     pub context_window_size: u64,
+    /// True when `context_window_size` is a provider fallback guess rather than
+    /// a registry-backed value. Auto-compact must never fire on an estimate.
+    pub context_window_is_estimate: bool,
     /// How many tokens are currently used in the context window.
     pub context_used_tokens: u64,
     /// Rate limit info — 5-hour window usage percentage (0–100).
@@ -1360,6 +1368,7 @@ impl App {
             auto_compact_enabled: false,
             auto_compact_threshold: 95,
             auto_compact_running: false,
+            auto_compact_latched: false,
             voice_recorder: {
                 // Check whether voice input has been enabled via the /voice command
                 // (stored in ~/.claurst/ui-settings.json).  We also accept
@@ -1393,6 +1402,7 @@ impl App {
             user_question_rx: None,
             ask_user_dialog: crate::ask_user_dialog::AskUserDialogState::new(),
             context_window_size: 0,
+            context_window_is_estimate: false,
             context_used_tokens: 0,
             rate_limit_5h_pct: None,
             rate_limit_7day_pct: None,
@@ -1491,6 +1501,8 @@ impl App {
                 self.cost_tracker.set_model(&self.model_name);
                 self.refresh_context_window_size();
                 self.context_used_tokens = 0;
+                // Fresh context — re-arm auto-compact.
+                self.auto_compact_latched = false;
                 self.has_credentials = self.config.resolve_api_key().is_some();
                 self.auth_store = claurst_core::AuthStore::load();
                 self.plan_mode = matches!(
@@ -1758,6 +1770,8 @@ impl App {
         self.model_name = model;
         self.refresh_context_window_size();
         self.context_used_tokens = 0;
+        // Fresh context — re-arm auto-compact.
+        self.auto_compact_latched = false;
     }
 
     /// Update the Rustle pose for this frame — handles temporary poses, random blinks,
@@ -1874,14 +1888,18 @@ impl App {
             .unwrap_or(&self.model_name);
         if let Some(entry) = self.model_registry.get(provider, model_id) {
             self.context_window_size = entry.info.context_window as u64;
+            self.context_window_is_estimate = false;
         } else {
-            // Fallback: common defaults
+            // Fallback: common defaults. This is a guess, not a registry-backed
+            // value, so mark it as an estimate — auto-compact refuses to fire
+            // against it.
             self.context_window_size = match provider {
                 "anthropic" => 200_000,
                 "openai" => 128_000,
                 "google" => 1_048_576,
                 _ => 128_000,
             };
+            self.context_window_is_estimate = true;
         }
     }
 
@@ -1896,6 +1914,8 @@ impl App {
         self.refresh_context_window_size();
         // Reset used tokens when switching models (context is fresh).
         self.context_used_tokens = 0;
+        // Fresh context — re-arm auto-compact.
+        self.auto_compact_latched = false;
     }
 
     /// Apply a theme by name, persisting it to config.
@@ -5983,6 +6003,16 @@ impl App {
                     let turn_tokens = u.input_tokens + u.output_tokens
                         + u.cache_creation_input_tokens + u.cache_read_input_tokens;
                     self.context_used_tokens = self.context_used_tokens.saturating_add(turn_tokens);
+                    // Re-arm auto-compact once usage falls back below the
+                    // hysteresis threshold (e.g. after a compact that actually
+                    // pruned history, or a partial rollback).
+                    if self.context_window_size > 0 {
+                        let pct = self.context_used_tokens as f64
+                            / self.context_window_size as f64 * 100.0;
+                        if pct < 95.0 {
+                            self.auto_compact_latched = false;
+                        }
+                    }
                 }
                 // Record elapsed time and pick a completion verb
                 let seed = self.frame_count as usize ^ (self.messages.len() * 7);
