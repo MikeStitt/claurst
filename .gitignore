@@ -1,6 +1,9 @@
 # Rust
 src-rust/target/
 
+# Built release binaries — never commit build outputs
+claurst-linux-*
+
 # OS
 .DS_Store
 
