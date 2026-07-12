@@ -340,15 +340,19 @@ fn resolve_bridge_config(
     bridge_config.is_active().then_some(bridge_config)
 }
 
-fn handle_exit_key(app: &mut claurst_tui::app::App, key: crossterm::event::KeyEvent, cancel: &Option<tokio_util::sync::CancellationToken>) -> bool {
+fn handle_exit_key(app: &mut claurst_tui::app::App, key: crossterm::event::KeyEvent, cancel: &Option<tokio_util::sync::CancellationToken>, query_active: bool) -> bool {
     if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
         return false;
     }
 
     match key.code {
         crossterm::event::KeyCode::Char('c') => {
-            // Cancel background task first, then let app handle state cleanup
-            if app.is_streaming {
+            // Cancel any in-flight query first, then let app handle state
+            // cleanup. Gate on `query_active` (current_query.is_some()) rather
+            // than app.is_streaming: an earlier ESC may have flipped
+            // is_streaming to false while the query kept running, and the UI
+            // flag is not ground truth for "work is running".
+            if query_active {
                 if let Some(ref ct) = cancel {
                     ct.cancel();
                 }
@@ -2033,17 +2037,36 @@ async fn run_interactive(
                     }
 
                     // Ctrl+C and Ctrl+D: exit confirmation handling
-                    if handle_exit_key(&mut app, key, &cancel) {
+                    if handle_exit_key(&mut app, key, &cancel, current_query.is_some()) {
                         if app.should_exit {
                             break 'main;
                         }
                         continue;
                     }
 
+                    // ESC: cancel the in-flight query for real. The TUI's Esc
+                    // handler only clears spinner/stream buffers and flips
+                    // is_streaming — it never cancels the token, so the provider
+                    // stream and tool loop keep running while the UI says
+                    // "Cancelled." Cancel here (ground-truthed on current_query,
+                    // not is_streaming), then fall through to the TUI handler
+                    // for its state cleanup.
+                    if key.code == KeyCode::Esc && current_query.is_some() {
+                        if let Some(ref ct) = cancel {
+                            ct.cancel();
+                        }
+                        app.handle_key_event(key);
+                        continue;
+                    }
+
                     // Enter => submit input (but NOT when ANY dialog/overlay is open —
                     // dialogs handle their own Enter in handle_key_event).
                     let any_dialog_open = app.any_modal_open();
-                    if key.code == KeyCode::Enter && app.is_streaming && !any_dialog_open {
+                    // Branch on current_query (real in-flight work), not
+                    // app.is_streaming: after an ESC the flag can be false while
+                    // a query still runs, and submitting then would spawn a
+                    // second concurrent run_query_loop, leaking the first.
+                    if key.code == KeyCode::Enter && current_query.is_some() && !any_dialog_open {
                         // Queue the message: it will auto-submit once the
                         // current turn finishes (issue #149).
                         let input = app.take_input();
@@ -2059,7 +2082,7 @@ async fn run_interactive(
                         }
                         continue;
                     }
-                    if key.code == KeyCode::Enter && !app.is_streaming && !any_dialog_open {
+                    if key.code == KeyCode::Enter && current_query.is_none() && !any_dialog_open {
                         // If a file-ref suggestion is active, accept it instead of submitting.
                         if !app.prompt_input.suggestions.is_empty()
                             && app.prompt_input.suggestion_index.is_some()
